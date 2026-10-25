@@ -1,0 +1,90 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  pull_request:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  lint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq cppcheck
+      - run: cppcheck --enable=warning,style,performance --error-exitcode=1 --suppress=missingIncludeSystem src/
+
+  build:
+    runs-on: ubuntu-24.04
+    container: gcc:13-bookworm
+    steps:
+      - uses: actions/checkout@v4
+      - run: apt-get update -qq && apt-get install -y -qq --no-install-recommends cmake openmpi-bin libopenmpi-dev
+      - run: |
+          cmake -S . -B build -DMPIEXEC_PREFLAGS="--allow-run-as-root;--oversubscribe"
+          cmake --build build -j
+      - uses: actions/upload-artifact@v4
+        with: {name: build, path: build/, retention-days: 7}
+
+  test:
+    needs: build
+    runs-on: ubuntu-24.04
+    container: gcc:13-bookworm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: {name: build, path: build}
+      - run: apt-get update -qq && apt-get install -y -qq --no-install-recommends cmake openmpi-bin libopenmpi-dev
+      - run: chmod +x build/bcast_test && cd build && ctest --output-on-failure   # l'artefact perd le bit x
+      - run: mpirun -np 4 --allow-run-as-root --oversubscribe ./build/bcast_test
+
+  package:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: {name: build, path: build}
+      - run: |
+          V=${GITHUB_REF_NAME#v}
+          mkdir -p dist/mpi-devops-$V/bin
+          cp build/bcast_test dist/mpi-devops-$V/bin/ && cp -r src CMakeLists.txt dist/mpi-devops-$V/
+          tar -C dist -czf mpi-devops-$V.tar.gz mpi-devops-$V
+          sha256sum mpi-devops-$V.tar.gz | tee checksums.txt
+      - uses: actions/upload-artifact@v4
+        with: {name: release, path: "mpi-devops-*.tar.gz\nchecksums.txt"}
+
+  registry_login:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "${{ secrets.REGISTRY_TOKEN }}" | docker login -u "${{ github.actor }}" --password-stdin ghcr.io || echo "login simulé (fausse valeur)"
+
+  # Mission 3 : runner auto-hébergé sur le login de ROMEO (romeo1), label hpc-login
+  test_hpc:
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, hpc-login]
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash -leo pipefail {0}   # shell de login, sinon pas de sbatch ni de romeo_load_*
+    steps:
+      - uses: actions/checkout@v4
+      - name: env Spack
+        run: |
+          rc=0; sbatch --wait ci/spack_install.sh || rc=$?
+          tail -n 15 spack-install-*.out
+          exit $rc
+      - name: test MPI
+        run: ci/slurm_poll.sh ci/job_ci.sh 30
+      - name: scancel
+        if: failure() || cancelled()
+        run: '[ -f .slurm_jobid ] && scancel "$(cat .slurm_jobid)" || true'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: {name: slurm-logs, path: "ci-*.out\nspack-install-*.out"}

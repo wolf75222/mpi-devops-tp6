@@ -1,0 +1,96 @@
+stages: [lint, build, test, package, test_hpc]
+
+default:
+  image: gcc:13-bookworm
+
+build:
+  stage: build
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends cmake openmpi-bin libopenmpi-dev
+  script:
+    - cmake -S . -B build -DMPIEXEC_PREFLAGS="--allow-run-as-root;--oversubscribe"
+    - cmake --build build -j
+  artifacts:
+    paths: [build/]
+    expire_in: 1 week
+
+test:
+  stage: test
+  needs: [build]
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends cmake openmpi-bin libopenmpi-dev
+  script:
+    - cd build && ctest --output-on-failure
+    - mpirun -np 4 --allow-run-as-root --oversubscribe ./bcast_test
+
+lint:
+  stage: lint
+  needs: []
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq cppcheck
+  script:
+    - cppcheck --enable=warning,style,performance --error-exitcode=1 --suppress=missingIncludeSystem src/
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+package:
+  stage: package
+  needs: [build]
+  script:
+    - V=${CI_COMMIT_TAG#v}
+    - mkdir -p dist/mpi-devops-$V/bin
+    - cp build/bcast_test dist/mpi-devops-$V/bin/ && cp -r src CMakeLists.txt dist/mpi-devops-$V/
+    - tar -C dist -czf mpi-devops-$V.tar.gz mpi-devops-$V
+    - sha256sum mpi-devops-$V.tar.gz | tee checksums.txt
+  artifacts:
+    paths: [mpi-devops-*.tar.gz, checksums.txt]
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+
+# REGISTRY_TOKEN : variable Masked + Protected, déclarée dans Settings > CI/CD > Variables
+registry_login:
+  stage: package
+  needs: []
+  image: docker:27-cli
+  script:
+    - test -n "$REGISTRY_TOKEN" || { echo "REGISTRY_TOKEN vide (branche non protégée ?)"; exit 1; }
+    - echo "$REGISTRY_TOKEN" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY" || echo "login simulé (fausse valeur)"
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# Mission 3 : runner shell installé sur le login de ROMEO, tag hpc-login
+.hpc:
+  stage: test_hpc
+  tags: [hpc-login]
+  needs: []
+  timeout: 45m
+  artifacts:
+    paths: [ci-*.out, spack-install-*.out]
+    when: always
+
+slurm_polling:
+  extends: .hpc
+  retry:
+    max: 1
+    when: [runner_system_failure, stuck_or_timeout_failure]
+    exit_codes: [2]   # échec d'infra côté Slurm, voir slurm_poll.sh
+  script:
+    - sbatch --wait ci/spack_install.sh
+    - ci/slurm_poll.sh ci/job_ci.sh 30
+  after_script:
+    - '[ -f .slurm_jobid ] && scancel "$(cat .slurm_jobid)" || true'
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# la même chose avec sbatch --wait, lancée à la main pour comparer
+slurm_wait:
+  extends: .hpc
+  script:
+    - sbatch --wait ci/spack_install.sh
+    - sbatch --wait ci/job_ci.sh
+    - grep -q ^SUCCESS ci-*.out
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+      allow_failure: true
