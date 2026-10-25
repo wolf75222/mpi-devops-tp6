@@ -1,0 +1,24 @@
+# Env Spack du TP6 sur ROMEO (x64cpu). Versions et hash exacts : spack.lock.
+spack:
+  specs:
+  # OpenMPI du site (buildable: false sur ROMEO), %gcc refusé par Spack 1.0.1
+  - openmpi@4.1.7 schedulers=slurm
+  # gcc système trouvé par spack compiler find
+  - cmake@3.30.9 build_type=Release %gcc@11.5.0
+  view: true
+  concretizer:
+    unify: true
+    reuse:
+      roots: true
+      # le cmake de ROMEO a besoin de /lib64/libmd.so.0, absent des nœuds de calcul
+      exclude: [cmake]
+  packages:
+    gcc:
+      externals:
+      - spec: gcc@11.5.0 languages:='c,c++,fortran'
+        prefix: /usr
+        extra_attributes:
+          compilers:
+            c: /usr/bin/gcc
+            cxx: /usr/bin/g++
+            fortran: /usr/bin/gfortran
