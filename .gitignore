@@ -1,0 +1,9 @@
+build/
+build-*/
+dist/
+ci-*.out
+spack-install-*.out
+spack/.spack-env/
+*.tar.gz
+checksums.txt
+.slurm_jobid
