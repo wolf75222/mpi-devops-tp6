@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define N 1024
+#define N 1024  /* nombre d'entiers diffusés */
 
 int main(int argc, char **argv)
 {
